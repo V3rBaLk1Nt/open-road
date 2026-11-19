@@ -11,16 +11,25 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 RATE = 16000
-ROWS = 5
+FFT = 2048
+MIN_HZ = 80.0
+MAX_HZ = 3000.0
+
 SOURCE = os.environ.get("OSTT_VIZ_SOURCE", "default")
 CAPTURE = os.environ.get("OSTT_VIZ_CAPTURE")
 NOPASTE = os.environ.get("OSTT_VIZ_NOPASTE") == "1"
 DEBUG = os.environ.get("OSTT_VIZ_DEBUG") == "1"
 WAV = "/tmp/ostt-viz-%d.wav" % os.getpid()
 PIDFILE = os.path.expanduser("~/.config/ostt-viz.pid")
-DB_FLOOR = 78.0
 
-state = {"stop": False, "cancel": False, "paused": False, "peaks": None}
+GLYPHS = "0123456789ABCDEFabcxyz+-*/:.="
+GREEN = (57, 255, 20)
+YELLOW = (255, 183, 3)
+RED = (255, 42, 42)
+RAIN_DIM = (16, 78, 30)
+RAIN_MID = (28, 130, 44)
+
+state = {"stop": False, "cancel": False, "paused": False}
 
 
 def on_signal(sig, frame):
@@ -30,88 +39,96 @@ def on_signal(sig, frame):
 for s in (signal.SIGUSR1, signal.SIGTERM, signal.SIGINT):
     signal.signal(s, on_signal)
 
-win = np.hanning(2048).astype(np.float32)
-
-
-def color_for(n):
-    n = max(0.0, min(1.0, n))
-    if n < 0.38:
-        t = n / 0.38
-        return 0, int(120 + 110 * t), 50
-    if n < 0.46:
-        t = (n - 0.38) / 0.08
-        return int(255 * t), int(230 + 25 * t), int(50 * (1 - t))
-    if n < 0.72:
-        t = (n - 0.46) / 0.26
-        return 255, int(255 - 20 * t), 0
-    if n < 0.82:
-        t = (n - 0.72) / 0.10
-        return 255, int(235 - 195 * t), 0
-    t = (n - 0.82) / 0.18
-    return 255, int(40 + 60 * t), 0
+win = np.hanning(FFT).astype(np.float32)
 
 
 def term_size():
     buf = struct.pack("HHHH", 0, 0, 0, 0)
     fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, buf)
     rows, cols, _, _ = struct.unpack("HHHH", buf)
-    return max(rows, 10), max(cols, 40)
+    return max(rows, 8), max(cols, 40)
 
 
-def compute(bands_n, cols):
-    n = cols - 10
-    edges = np.geomspace(70, 12000, n + 1)
-    freqs = np.fft.rfftfreq(2048, 1.0 / RATE)
-    out = np.zeros(n)
-    for i in range(n):
+def analyze(samples, nbands):
+    x = samples.astype(np.float32) / 32768.0
+    if x.size < FFT:
+        x = np.pad(x, (0, FFT - x.size))
+    else:
+        x = x[-FFT:]
+    spec = np.abs(np.fft.rfft(x * win))
+    peak = max(float(spec.max()), 1e-9)
+    shape = np.clip(
+        (20.0 * np.log10(np.maximum(spec / peak, 1e-6)) + 78.0) / 78.0,
+        0.0, 1.0)
+    freqs = np.fft.rfftfreq(FFT, 1.0 / RATE)
+    edges = np.linspace(MIN_HZ, MAX_HZ, nbands + 1)
+    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    db = 20.0 * math.log10(max(rms, 1e-6))
+    drive = max(0.18, min(1.0, (db + 48.0) / 48.0))
+    out = np.zeros(nbands)
+    for i in range(nbands):
         m = (freqs >= edges[i]) & (freqs < edges[i + 1])
-        out[i] = bands_n[m].max() if m.any() else 0.0
+        if m.any():
+            out[i] = float(shape[m].max()) * 100.0 * drive
     return out
 
 
-def render(vals, peaks, cols, rows, elapsed, level):
-    top = rows - ROWS
-    grid_row = top - 1
-    lines = []
+def level_of(samples):
+    x = samples.astype(np.float32) / 32768.0
+    if x.size == 0:
+        return 0.0
+    rms = float(np.sqrt(np.mean(x * x)))
+    db = 20.0 * math.log10(max(rms, 1e-6))
+    return max(0.0, min(100.0, ((db + 60.0) / 60.0) * 100.0))
 
-    for r in range(rows):
-        lines.append("\x1b[%d;1H\x1b[K" % (r + 1))
 
-    head = "  * REC" if not state["paused"] else "  || PAUSED"
-    head += "  %05.1fs   peak %5.1f dB   40 Hz - 12 kHz" % (elapsed, level)
-    sys.stdout.write("\x1b[1;1H" + head[:cols - 1] + "\x1b[K")
-    lines[0] = head
+def render(vals, rows, cols, elapsed, lvl, tick, paused):
+    parts = []
+    head = "  UCO 777  " + ("* REC" if not paused else "|| PAUSED")
+    head += "  %05.1fs  LVL:%03d%%  80-3000 Hz" % (elapsed, int(lvl))
+    parts.append("\x1b[1;1H\x1b[2K\x1b[38;2;57;255;20m%s\x1b[0m" % head[:cols])
 
-    scale = "  " + "".join(
-        ("\x1b[38;2;70;74;80m|\x1b[0m" if i % 12 == 0 else "\x1b[38;2;34;37;42m.\x1b[0m")
-        for i in range(cols - 4)
-    )
-    sys.stdout.write("\x1b[%d;1H%s\x1b[K" % (grid_row + 1, scale[:cols - 1]))
-    lines[grid_row] = scale
+    mid = (rows + 2) // 2
+    maxh = max(2, (rows - 4) // 2)
+    trail = max(3, rows // 3)
+    span = rows + trail
 
-    for i in range(ROWS):
-        r = grid_row - 1 - i
-        y = (i + 0.5) / ROWS
-        row = "  "
-        for c in range(cols - 4):
+    for r in range(2, rows):
+        d = abs(r - mid)
+        line = ["\x1b[%d;1H" % r]
+        cur = None
+        for c in range(cols):
+            ch = " "
+            col = None
             v = vals[c] if c < len(vals) else 0.0
-            p = peaks[c] if c < len(peaks) else 0.0
-            if v >= y or p >= y:
-                if p >= y and p > v:
-                    row += "\x1b[38;2;255;60;40m@"
-                else:
-                    red, green, blue = color_for(v)
-                    row += "\x1b[38;2;%d;%d;%dm#" % (red, green, blue)
+            h = int(v / 100.0 * maxh + 0.5)
+            if h > 0 and d <= h:
+                frac = d / float(maxh)
+                col = GREEN if frac < 0.45 else (YELLOW if frac < 0.70 else RED)
+                ch = "\u2588"
             else:
-                row += " "
-        sys.stdout.write("\x1b[%d;1H%s\x1b[K" % (r + 1, row))
-        lines[r] = row
+                lead = (tick // 2 + c * 7) % span
+                dd = (lead - r) % span
+                if dd < trail:
+                    idx = (r * 131 + c * 17 + tick // 4) % len(GLYPHS)
+                    ch = GLYPHS[idx]
+                    if dd == 0:
+                        col = RED
+                    elif dd < 3:
+                        col = RAIN_MID
+                    else:
+                        col = RAIN_DIM
+            if col != cur:
+                line.append("\x1b[0m" if col is None else "\x1b[38;2;%d;%d;%dm" % col)
+                cur = col
+            line.append(ch)
+        line.append("\x1b[0m\x1b[K")
+        parts.append("".join(line))
 
-    lbl = "  %4.0f" % (level - DB_FLOOR)
-    sys.stdout.write("\x1b[%d;1H%s\x1b[K" % (rows, lbl))
-    lines[rows - 1] = lbl
-    sys.stdout.write("\x1b[?25l")
-    return lines
+    foot = "  [ENTER] transcribe  [SPACE] pause  [ESC] cancel"
+    parts.append("\x1b[%d;1H\x1b[2K\x1b[38;2;70;90;80m%s\x1b[0m" % (rows, foot[:cols]))
+    parts.append("\x1b[?25l")
+    sys.stdout.write("".join(parts))
 
 
 def main():
@@ -147,8 +164,9 @@ def main():
     tty.setcbreak(stdin_fd)
     start = time.time()
     buf = b""
-    peaks = None
-    level = 0.0
+    smooth = None
+    lvl = 0.0
+    tick = 0
     last = 0.0
     try:
         while not state["stop"]:
@@ -176,36 +194,18 @@ def main():
             rows, cols = term_size()
             arr = np.frombuffer(buf[-4096:] if len(buf) >= 4096 else buf, dtype=np.int16)
             if arr.size >= 256:
-                x = arr.astype(np.float32)
-                if len(x) < 2048:
-                    x = np.pad(x, (0, 2048 - len(x)))
-                spec = np.abs(np.fft.rfft(x * win))
-                peak = max(float(spec.max()), 1e-9)
-                shape = np.clip(
-                    (20 * np.log10(np.maximum(spec / peak, 1e-6)) + DB_FLOOR) / DB_FLOOR,
-                    0.0, 1.0)
-                frame_db = 20 * math.log10(max(float(np.sqrt(np.mean(x * x))), 1.0) / 32768.0)
-                drive = max(0.18, min(1.0, (frame_db + 48.0) / 48.0))
-                vals = compute(shape, cols) * drive
-                level = max(0.0, frame_db)
-            else:
-                vals = np.zeros(max(cols - 10, 1))
-            if peaks is None or len(peaks) != len(vals):
-                peaks = vals.copy()
-            else:
-                peaks = np.maximum(peaks - 0.012, vals)
-            lines = render(vals, peaks, cols, rows, now - start, level)
+                raw = analyze(arr, cols)
+                if smooth is None or len(smooth) != cols:
+                    smooth = raw.copy()
+                else:
+                    smooth = np.where(raw >= smooth, raw, np.maximum(smooth * 0.9, raw))
+                lvl = level_of(arr)
+            elif smooth is None:
+                smooth = np.zeros(cols)
+            tick += 1
+            render(smooth, rows, cols, now - start, lvl, tick, state["paused"])
             if DEBUG:
-                cols_seen = set()
-                for l in lines:
-                    i = 0
-                    while True:
-                        i = l.find("38;2;", i)
-                        if i < 0:
-                            break
-                        cols_seen.add(l[i:i + 16])
-                        i += 6
-                sys.stderr.write("\n".join(sorted(cols_seen)) + "\n---\n")
+                sys.stderr.write("bands=%d lvl=%.1f\n" % (len(smooth), lvl))
                 sys.stderr.flush()
             sys.stdout.flush()
     finally:

@@ -15,5 +15,5 @@ if [ -f "$PIDFILE" ]; then
 fi
 
 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 setsid -f ghostty --class=ostt-popup --font-family="JetBrainsMono Nerd Font" --font-size=13 --title=ostt --window-padding-x=0 --window-padding-y=0 \
-  --window-width=1280 --window-height=210 --window-position-x=0 --window-position-y=810 \
+  --window-width=1280 --window-height=420 --window-position-x=0 --window-position-y=600 \
   -e "$VIZ" >/dev/null 2>&1
