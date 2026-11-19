@@ -2,7 +2,8 @@
 # speak.sh - Read TEXT aloud using piper-tts offline female voice.
 # Model: en_US-amy-medium (natural American female voice, local, offline)
 # Toggle: write 0 to ~/.config/opencode-assist/speak.enabled to disable auto-speech
-# Stop: press Super+Shift+V again while speaking to stop playback mid-stream
+# Stop: press Super+Shift+Q to stop playback. This script ONLY starts. It never
+# stops, so it can never mistake a stop request for a new request.
 # Default: length_scale=0.85, volume=1.0
 MODEL="/home/YOUR_USERNAME/.local/share/piper/voices/en_US-amy-medium.onnx"
 TOGGLE="/home/YOUR_USERNAME/.config/opencode-assist/speak.enabled"
@@ -21,26 +22,33 @@ if [ -f "$TOGGLE" ] && [ "$(cat "$TOGGLE")" = "0" ]; then
   exit 0
 fi
 
-# Second press while audio is genuinely playing = stop it.
-# A pidfile is only trusted if the pid is alive AND its cmdline is our player.
-# Stale or recycled pids are discarded instead of silencing the next request.
-if [ -f "$PIDFILE" ]; then
-  read -r OLD_PID OLD_START < "$PIDFILE" 2>/dev/null
-  if [ -n "$OLD_PID" ] && [ -r "/proc/$OLD_PID/cmdline" ]; then
-    OLD_CMD=$(tr '\0' ' ' < "/proc/$OLD_PID/cmdline" 2>/dev/null)
-    case "$OLD_CMD" in
-      *pw-play*|*ffmpeg*opencode_s*)
-        if [ -n "$OLD_START" ] && [ $(( $(date +%s) - OLD_START )) -lt 120 ]; then
-          kill "$OLD_PID" 2>/dev/null
-          rm -f "$PIDFILE"
-          echo "TTS playback stopped"
-          exit 0
-        fi
-        ;;
-    esac
+# Single-flight lock. Synthesis takes seconds before any audio exists, so a
+# second press during that window used to start ANOTHER voice. mkdir is atomic,
+# so exactly one speak can be in flight at a time. Press Super+Shift+Q to stop.
+LOCKDIR="/tmp/opencode-speak.lock"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+  # Lock exists. Break it if the owner is gone or has been stuck for 5 minutes,
+  # so a killed process can never permanently disable TTS.
+  if [ -f "$LOCKDIR/pid" ]; then
+    read -r LOCK_PID LOCK_START < "$LOCKDIR/pid" 2>/dev/null
+    ALIVE=0
+    [ -n "${LOCK_PID:-}" ] && [ -d "/proc/$LOCK_PID" ] && ALIVE=1
+    STALE=0
+    [ -n "${LOCK_START:-}" ] && [ $(( $(date +%s) - LOCK_START )) -gt 300 ] && STALE=1
+    if [ "$ALIVE" = "0" ] || [ "$STALE" = "1" ]; then
+      rm -rf "$LOCKDIR"
+    fi
+  else
+    rm -rf "$LOCKDIR"
   fi
-  rm -f "$PIDFILE"
+  if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "TTS already speaking - press Super+Shift+Q to stop it" >&2
+    exit 0
+  fi
 fi
+echo "$$ $(date +%s)" > "$LOCKDIR/pid"
+# Always drop the lock on the way out, however we leave.
+trap 'rm -rf "$LOCKDIR"' EXIT
 
 TEXT="${1:-$(wl-paste 2>/dev/null)}"
 if [ -z "$TEXT" ]; then

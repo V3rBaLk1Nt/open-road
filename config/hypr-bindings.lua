@@ -84,8 +84,18 @@ os.remove(VIZ_PASTE_FLAG)
 viz_watch_paste_flag()
 
 -- TTS playback: copy text, press Super+Shift+V to read aloud with female voice.
--- Press it again while speaking to stop mid-sentence.
+-- Super+Shift+V ONLY ever starts. It is single-flight, so a second press while
+-- synthesizing or speaking is refused instead of stacking another voice.
+-- Press Super+Shift+Q to stop. Different key on purpose: the stop path has no
+-- timing window and no toggle logic, so it can never restart the speech.
 -- Keep this on Super+Shift+V: Ctrl+Super+V collides with omarchy's clipboard
 -- manager (both resolve to modmask 68) and the clipboard manager wins.
 -- Disable auto-speech by writing 0 to ~/.config/opencode-assist/speak.enabled.
 o.bind("SUPER + SHIFT + V", "TTS read aloud", "'/home/YOUR_USERNAME/.local/opencode-assist/speak.sh'")
+o.bind("SUPER + SHIFT + Q", "TTS stop", "'/home/YOUR_USERNAME/.local/opencode-assist/stop.sh'")
+
+-- App selector on SUPER + SPACE; the Omarchy menu moves to SUPER + ALT + SPACE.
+hl.unbind("SUPER + SPACE")                                   -- was: Omarchy menu
+o.bind("SUPER + SPACE", "Apps", { menu = "apps" })
+hl.unbind("SUPER + ALT + SPACE")                             -- was: Apps
+o.bind("SUPER + ALT + SPACE", "Omarchy menu", { menu = "root" })

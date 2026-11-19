@@ -41,11 +41,13 @@ mkdir -p "$BIN" "$ASSIST" "$CFG/opencode/plugin" "$CFG/ostt"
 install -m 755 "$SRC/bin/ostt-viz"        "$BIN/ostt-viz"
 install -m 755 "$SRC/bin/ostt-viz-launch" "$BIN/ostt-viz-launch"
 install -m 755 "$SRC/scripts/speak.sh"    "$ASSIST/speak.sh"
+install -m 755 "$SRC/scripts/stop.sh"     "$ASSIST/stop.sh"
 install -m 644 "$SRC/scripts/dictate.py"  "$ASSIST/dictate.py"
 install -m 644 "$SRC/scripts/build_player.py" "$ASSIST/build_player.py"
 say "$BIN/ostt-viz"
 say "$BIN/ostt-viz-launch"
 say "$ASSIST/speak.sh"
+say "$ASSIST/stop.sh"
 
 echo
 echo "Optional config files (NOT overwritten if they already exist):"

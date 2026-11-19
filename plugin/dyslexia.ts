@@ -12,6 +12,7 @@ const SPEAK = join(homedir(), ".local", "opencode-assist", "speak.sh")
 const VENV_PY = join(homedir(), ".local", "opencode-assist", "bin", "python")
 const DICTATE = join(homedir(), ".local", "opencode-assist", "dictate.py")
 const BUILD_PLAYER = join(homedir(), ".local", "opencode-assist", "build_player.py")
+const LAUNCHER = join(homedir(), ".local", "bin", "uco-listener")
 
 const out = (...a: unknown[]) => console.log("[dyslexia]", ...a)
 
@@ -85,7 +86,12 @@ export default (async ({ $ }) => {
     mkdirSync(PLAYER_DIR, { recursive: true })
     const r = await $`${VENV_PY} ${BUILD_PLAYER} ${HISTORY_FILE} ${String(maxMsgs)} ${PLAYER_DIR}`.text()
     const html = r.trim().split("\n").pop() ?? ""
-    if (html) await $`xdg-open ${html}`
+    if (!html) return html
+    try {
+      await $`${LAUNCHER} --html ${html}`
+    } catch {
+      await $`xdg-open ${html}`
+    }
     return html
   }
 
@@ -128,7 +134,7 @@ export default (async ({ $ }) => {
     "chat.message": async (input, output) => {
       try {
         const message = output.message as { role?: string; id?: string }
-        const isAssistant = Boolean(input.model) || message?.role === "assistant"
+        const isAssistant = message?.role === "assistant"
         if (!isAssistant) return
         const text = (output.parts ?? [])
           .filter((p) => p.type === "text")

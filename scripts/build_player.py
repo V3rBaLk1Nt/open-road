@@ -7,12 +7,83 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import struct
 import subprocess
 import sys
 
 ESK = os.path.join(os.path.expanduser("~"), ".local", "espeak-ng", "bin", "espeak-ng")
 RATE, PITCH, GAP = 150, 42, 6  # words/min, pitch, word gap ms
+
+OPENCODE_DB = os.path.join(os.path.expanduser("~"), ".local", "share", "opencode", "opencode.db")
+
+
+def speech_text(text):
+    """Plain speech text: drop markdown, turn table rows into sentences, and
+    restore the e/3 reading switch so the voice says 'the' not 'th-three'."""
+    lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            lines.append("")
+            continue
+        if set(s) <= set("-:| "):
+            continue
+        if s.startswith("|") and s.endswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            s = ": ".join(c for c in cells if c)
+        s = re.sub(r"^[-*\u2022]\s+", "", s)
+        lines.append(s)
+    text = "\n".join(lines)
+    text = text.replace("*", "").replace("`", "")
+    text = re.sub(r"^#+\s*", "", text, flags=re.M)
+
+    def fix_token(m):
+        w = m.group()
+        return w.replace("3", "e") if re.search(r"[A-Za-z]", w) else w
+
+    return re.sub(r"[A-Za-z0-9']+", fix_token, text)
+
+
+def replies_from_db(max_msgs):
+    """Read real assistant replies (role=assistant, type=text) from opencode's
+    SQLite store, newest last. Returns None if the store is unavailable."""
+    if not os.path.exists(OPENCODE_DB):
+        return None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % OPENCODE_DB, uri=True, timeout=5)
+    except Exception:
+        return None
+    try:
+        cur = con.cursor()
+        rows = cur.execute(
+            "select m.id, p.data from message m join part p on p.message_id = m.id "
+            "where json_extract(m.data, '$.role') = 'assistant' "
+            "order by m.time_created desc, p.time_created desc limit 600"
+        )
+        texts, order = {}, []
+        for mid, data in rows:
+            try:
+                part = json.loads(data)
+            except Exception:
+                continue
+            if part.get("type") != "text":
+                continue
+            txt = (part.get("text") or "").strip()
+            if not txt:
+                continue
+            if mid not in texts:
+                texts[mid] = []
+                order.append(mid)
+            texts[mid].append(txt)
+        if not order:
+            return None
+        chosen = order[:max_msgs]
+        return ["\n".join(reversed(texts[m])) for m in reversed(chosen)]
+    except Exception:
+        return None
+    finally:
+        con.close()
 
 
 def wav_duration(path):
@@ -58,23 +129,28 @@ def main():
     history_path, max_msgs, out_dir = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     os.makedirs(out_dir, exist_ok=True)
 
-    entries = []
-    with open(history_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-            except Exception:
-                continue
-            if e.get("role") == "assistant" and e.get("text"):
-                entries.append(e["text"])
-    entries = entries[-max_msgs:]
+    entries = replies_from_db(max_msgs)
+    if entries is None:
+        entries = []
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue
+                    if e.get("role") == "assistant" and e.get("text"):
+                        entries.append(e["text"])
+        except OSError:
+            entries = []
+        entries = entries[-max_msgs:]
 
     cues = []
     for e in entries:
-        cues.extend(split_cues(e))
+        cues.extend(split_cues(speech_text(e)))
 
     if not cues:
         sys.stderr.write("No assistant replies recorded yet — send a message first.\n")
